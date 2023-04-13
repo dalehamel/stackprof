@@ -99,11 +99,17 @@ typedef struct {
     st_table *tags;
 } sample_tags_t;
 
+// TODO move here
+//typedef struct {
+//
+//} sample_overhead_t;
+
 static struct {
     int running;
     int raw;
     int aggregate;
     int record_tags;
+    int record_overhead;
 
     VALUE mode;
     VALUE interval;
@@ -120,6 +126,14 @@ static struct {
     sample_time_t *raw_sample_times;
     size_t raw_sample_times_len;
     size_t raw_sample_times_capa;
+
+    size_t total_overhead;
+    size_t frame_total_overhead;
+    size_t frame_buffer_overhead;
+    size_t frame_record_overhead;
+    size_t tag_total_overhead;
+    size_t tag_buffer_overhead;
+    size_t tag_record_overhead;
 
     size_t overall_signals;
     size_t overall_samples;
@@ -166,6 +180,7 @@ static VALUE sym_version, sym_mode, sym_interval, sym_raw, sym_metadata, sym_fra
 static VALUE sym_aggregate, sym_raw_sample_timestamps, sym_raw_timestamp_deltas, sym_state, sym_marking, sym_sweeping;
 static VALUE sym_gc_samples, objtracer;
 static VALUE sym___stackprof_tags, sym_sample_tags, sym_tag_source, sym_tags, sym_num_tags, sym_tag_strings, sym_thread_id, sym_fiber_id;
+static VALUE sym_overhead, sym_record_overhead, sym_buffer_tag_overhead, sym_buffer_frames_overhead, sym_record_tag_overhead, sym_record_frames_overhead;
 static VALUE gc_hook;
 static VALUE rb_mStackProf, rb_mStackProfTag;
 
@@ -180,7 +195,7 @@ stackprof_start(int argc, VALUE *argv, VALUE self)
     VALUE opts = Qnil, mode = Qnil, interval = Qnil, metadata = rb_hash_new(), out = Qfalse;
     VALUE tag_source = Qnil, tags_arg = Qnil, tags = Qnil;
     int ignore_gc = 0;
-    int raw = 0, aggregate = 1;
+    int raw = 0, aggregate = 1, record_overhead = 0;
     VALUE metadata_val;
 
     if (_stackprof.running)
@@ -208,6 +223,8 @@ stackprof_start(int argc, VALUE *argv, VALUE self)
 	    raw = 1;
 	if (rb_hash_lookup2(opts, sym_aggregate, Qundef) == Qfalse)
 	    aggregate = 0;
+	if (RTEST(rb_hash_aref(opts, sym_record_overhead)))
+	    record_overhead = 1;
 
         if (RTEST(rb_hash_aref(opts, sym_tag_source))) {
             tag_source = rb_hash_aref(opts, sym_tag_source);
@@ -281,6 +298,7 @@ stackprof_start(int argc, VALUE *argv, VALUE self)
     _stackprof.running = 1;
     _stackprof.raw = raw;
     _stackprof.aggregate = aggregate;
+    _stackprof.record_overhead = record_overhead;
     _stackprof.mode = mode;
     _stackprof.interval = interval;
     _stackprof.ignore_gc = ignore_gc;
@@ -296,6 +314,14 @@ stackprof_start(int argc, VALUE *argv, VALUE self)
     _stackprof.overall_tags = 0;
     _stackprof.buffered_tagsets = 0;
     _stackprof.current_buffered_tags_count = 0;
+
+    _stackprof.total_overhead = 0;
+    _stackprof.frame_total_overhead = 0;
+    _stackprof.frame_buffer_overhead = 0;
+    _stackprof.frame_record_overhead = 0;
+    _stackprof.tag_total_overhead = 0;
+    _stackprof.tag_buffer_overhead = 0;
+    _stackprof.tag_record_overhead = 0;
 
     if (raw) {
 	capture_timestamp(&_stackprof.last_sample_at);
@@ -426,10 +452,20 @@ sample_tags_i(st_data_t key, st_data_t val, st_data_t arg)
     return ST_DELETE;
 }
 
+static void
+record_overhead(timestamp_t *begin, size_t *counter)
+{
+    struct timestamp_t t;
+    int64_t timestamp_delta;
+    capture_timestamp(&t);
+    timestamp_delta = delta_usec(begin, &t);
+    *counter += timestamp_delta;
+}
+
 static VALUE
 stackprof_results(int argc, VALUE *argv, VALUE self)
 {
-    VALUE results, frames;
+    VALUE results, frames, overhead;
     VALUE sample_tags = Qnil, tag_strings = Qnil;
 
     if (!_stackprof.frames || _stackprof.running)
@@ -487,6 +523,14 @@ stackprof_results(int argc, VALUE *argv, VALUE self)
         }
         rb_hash_aset(results, sym_sample_tags, sample_tags);
     }
+    if (_stackprof.record_overhead) {
+        overhead = rb_hash_new();
+        rb_hash_aset(overhead, sym_buffer_tag_overhead, ULONG2NUM(_stackprof.tag_buffer_overhead));
+        rb_hash_aset(overhead, sym_buffer_frames_overhead, ULONG2NUM(_stackprof.frame_buffer_overhead));
+        rb_hash_aset(overhead, sym_record_tag_overhead, ULONG2NUM(_stackprof.tag_record_overhead));
+        rb_hash_aset(overhead, sym_record_frames_overhead, ULONG2NUM(_stackprof.frame_record_overhead));
+        rb_hash_aset(results,  sym_overhead, overhead);
+    }
 
     free(_stackprof.sample_tags);
     _stackprof.record_tags = 0;
@@ -502,6 +546,15 @@ stackprof_results(int argc, VALUE *argv, VALUE self)
     _stackprof.overall_tags = 0;
     _stackprof.buffered_tagsets = 0;
     _stackprof.current_buffered_tags_count = 0;
+
+    _stackprof.total_overhead = 0;
+    _stackprof.frame_total_overhead = 0;
+    _stackprof.frame_buffer_overhead = 0;
+    _stackprof.frame_record_overhead = 0;
+    _stackprof.tag_total_overhead = 0;
+    _stackprof.tag_buffer_overhead = 0;
+    _stackprof.tag_record_overhead = 0;
+
 
     if (_stackprof.raw && _stackprof.raw_samples_len) {
 	size_t len, n, o;
@@ -766,6 +819,10 @@ stackprof_record_sample_for_stack(int num, uint64_t sample_timestamp, int64_t ti
     int i, n;
     VALUE prev_frame = Qnil;
 
+    struct timestamp_t begin;
+    capture_timestamp(&begin);
+
+
     _stackprof.overall_samples++;
 
     if (_stackprof.raw && num > 0) {
@@ -871,10 +928,14 @@ stackprof_record_sample_for_stack(int num, uint64_t sample_timestamp, int64_t ti
     if (_stackprof.raw) {
 	capture_timestamp(&_stackprof.last_sample_at);
     }
-
+    if (_stackprof.record_overhead)
+	record_overhead(&begin, &_stackprof.frame_record_overhead);
+    capture_timestamp(&begin);
     if (_stackprof.record_tags) {
         stackprof_record_tags_for_sample();
     }
+    if (_stackprof.record_overhead)
+	record_overhead(&begin, &_stackprof.tag_record_overhead);
 }
 
 // stackprof_buffer_tags collects tags from a fiber local variable if it is
@@ -970,6 +1031,8 @@ stackprof_buffer_sample(void)
 	// Another sample is already pending
 	return;
     }
+    struct timestamp_t begin;
+    capture_timestamp(&begin);
 
     if (_stackprof.raw) {
 	struct timestamp_t t;
@@ -984,8 +1047,14 @@ stackprof_buffer_sample(void)
     _stackprof.buffer_time.timestamp_usec = start_timestamp;
     _stackprof.buffer_time.delta_usec = timestamp_delta;
 
+    if (_stackprof.record_overhead)
+	record_overhead(&begin, &_stackprof.frame_buffer_overhead);
+
+    capture_timestamp(&begin);
     if (_stackprof.record_tags)
-        stackprof_buffer_tags();
+	stackprof_buffer_tags();
+    if (_stackprof.record_overhead)
+	record_overhead(&begin, &_stackprof.tag_buffer_overhead);
 }
 
 void
@@ -1273,6 +1342,12 @@ Init_stackprof(void)
     S(thread_id);
     S(fiber_id);
     S(__stackprof_tags);
+    S(overhead);
+    S(record_overhead);
+    S(buffer_tag_overhead);
+    S(buffer_frames_overhead);
+    S(record_tag_overhead);
+    S(record_frames_overhead);
 #undef S
 
     /* Need to run this to warm the symbol table before we call this during GC */
