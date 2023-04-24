@@ -481,6 +481,7 @@ stackprof_results(int argc, VALUE *argv, VALUE self)
             st_foreach(_stackprof.sample_tags[n].tags, sample_tags_i, (st_data_t)tags);
             rb_ary_push(sample_tags, tags);
             rb_ary_push(sample_tags, ULONG2NUM(_stackprof.sample_tags[n].repeats));
+            st_free_table(_stackprof.sample_tags[n].tags);
         }
         rb_hash_aset(results, sym_sample_tags, sample_tags);
     }
