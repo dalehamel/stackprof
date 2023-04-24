@@ -5,10 +5,11 @@ require "ruby_memcheck"
 test_config = lambda do |t|
   t.libs << "test"
   t.libs << "lib"
-  t.test_files = FileList["test/**/*_test.rb"]
+  t.test_files = FileList["test/**/test_*.rb"]
 end
 Rake::TestTask.new(test: :compile, &test_config)
 namespace :test do
+  RubyMemcheck.config(binary_name: "stackprof/stackprof")
   RubyMemcheck::TestTask.new(valgrind: :compile, &test_config)
 end if RUBY_PLATFORM =~ /linux/ && `which valgrind` && $?.success?
 
