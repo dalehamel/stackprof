@@ -1,11 +1,16 @@
 require "bundler/gem_tasks"
 require "rake/testtask"
+require "ruby_memcheck"
 
-Rake::TestTask.new(:test) do |t|
+test_config = lambda do |t|
   t.libs << "test"
   t.libs << "lib"
-  t.test_files = FileList["test/**/test_*.rb"]
+  t.test_files = FileList["test/**/*_test.rb"]
 end
+Rake::TestTask.new(test: :compile, &test_config)
+namespace :test do
+  RubyMemcheck::TestTask.new(valgrind: :compile, &test_config)
+end if RUBY_PLATFORM =~ /linux/ && `which valgrind` && $?.success?
 
 if RUBY_ENGINE == "truffleruby"
   task :compile do
