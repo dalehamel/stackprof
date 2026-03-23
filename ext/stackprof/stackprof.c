@@ -544,7 +544,7 @@ st_numtable_increment(st_table *table, st_data_t key, size_t increment)
 }
 
 void
-stackprof_record_sample_for_stack(int num, uint64_t sample_timestamp, int64_t timestamp_delta)
+stackprof_record_sample_for_stack(int num, VALUE *frames_buffer, int *lines_buffer, uint64_t sample_timestamp, int64_t timestamp_delta)
 {
     int i, n;
     VALUE prev_frame = Qnil;
@@ -578,8 +578,8 @@ stackprof_record_sample_for_stack(int num, uint64_t sample_timestamp, int64_t ti
 	     * in the raw buffer are stored in the opposite direction of stacks
 	     * in the frames buffer that came from Ruby. */
 	    for (i = num-1, n = 0; i >= 0; i--, n++) {
-		VALUE frame = _stackprof.frames_buffer[i];
-		int line = _stackprof.lines_buffer[i];
+		VALUE frame = frames_buffer[i];
+		int line = lines_buffer[i];
 
 		// Encode the line in to the upper 16 bits.
 		uint64_t key = ((uint64_t)line << 48) | (uint64_t)frame;
@@ -601,8 +601,8 @@ stackprof_record_sample_for_stack(int num, uint64_t sample_timestamp, int64_t ti
 	    _stackprof.raw_sample_index = _stackprof.raw_samples_len;
 	    _stackprof.raw_samples[_stackprof.raw_samples_len++] = (VALUE)num;
 	    for (i = num-1; i >= 0; i--) {
-		VALUE frame = _stackprof.frames_buffer[i];
-		int line = _stackprof.lines_buffer[i];
+		VALUE frame = frames_buffer[i];
+		int line = lines_buffer[i];
 
 		// Encode the line in to the upper 16 bits.
 		uint64_t key = ((uint64_t)line << 48) | (uint64_t)frame;
@@ -633,8 +633,8 @@ stackprof_record_sample_for_stack(int num, uint64_t sample_timestamp, int64_t ti
     }
 
     for (i = 0; i < num; i++) {
-	int line = _stackprof.lines_buffer[i];
-	VALUE frame = _stackprof.frames_buffer[i];
+	int line = lines_buffer[i];
+	VALUE frame = frames_buffer[i];
 	frame_data_t *frame_data = sample_for(frame);
 
 	if (frame_data->seen_at_sample_number != _stackprof.overall_samples) {
@@ -717,11 +717,15 @@ stackprof_record_gc_samples(void)
     for (i = 0; i < _stackprof.unrecorded_gc_samples; i++) {
 	int64_t timestamp_delta = i == 0 ? delta_to_first_unrecorded_gc_sample : NUM2LONG(_stackprof.interval);
 
+	/* Use local arrays for GC frames to avoid a data race with the
+	 * signal handler, which can overwrite _stackprof.frames_buffer
+	 * via stackprof_buffer_sample/rb_profile_frames at any time. */
+	VALUE gc_frames[2];
+	int gc_lines[2] = {0, 0};
+
       if (_stackprof.unrecorded_gc_marking_samples) {
-        _stackprof.frames_buffer[0] = FAKE_FRAME_MARK;
-        _stackprof.lines_buffer[0] = 0;
-        _stackprof.frames_buffer[1] = FAKE_FRAME_GC;
-        _stackprof.lines_buffer[1] = 0;
+        gc_frames[0] = FAKE_FRAME_MARK;
+        gc_frames[1] = FAKE_FRAME_GC;
         _stackprof.unrecorded_gc_marking_samples--;
 
 #ifdef STACKPROF_TESTING
@@ -731,12 +735,10 @@ stackprof_record_gc_samples(void)
             _stackprof.buffer_count = 0;
         }
 #endif
-        stackprof_record_sample_for_stack(2, start_timestamp, timestamp_delta);
+        stackprof_record_sample_for_stack(2, gc_frames, gc_lines, start_timestamp, timestamp_delta);
       } else if (_stackprof.unrecorded_gc_sweeping_samples) {
-        _stackprof.frames_buffer[0] = FAKE_FRAME_SWEEP;
-        _stackprof.lines_buffer[0] = 0;
-        _stackprof.frames_buffer[1] = FAKE_FRAME_GC;
-        _stackprof.lines_buffer[1] = 0;
+        gc_frames[0] = FAKE_FRAME_SWEEP;
+        gc_frames[1] = FAKE_FRAME_GC;
 
         _stackprof.unrecorded_gc_sweeping_samples--;
 
@@ -747,10 +749,9 @@ stackprof_record_gc_samples(void)
             _stackprof.buffer_count = 0;
         }
 #endif
-        stackprof_record_sample_for_stack(2, start_timestamp, timestamp_delta);
+        stackprof_record_sample_for_stack(2, gc_frames, gc_lines, start_timestamp, timestamp_delta);
       } else {
-        _stackprof.frames_buffer[0] = FAKE_FRAME_GC;
-        _stackprof.lines_buffer[0] = 0;
+        gc_frames[0] = FAKE_FRAME_GC;
 
 #ifdef STACKPROF_TESTING
         if (stackprof_record_gc_samples_hook) {
@@ -759,7 +760,7 @@ stackprof_record_gc_samples(void)
             _stackprof.buffer_count = 0;
         }
 #endif
-        stackprof_record_sample_for_stack(1, start_timestamp, timestamp_delta);
+        stackprof_record_sample_for_stack(1, gc_frames, gc_lines, start_timestamp, timestamp_delta);
       }
     }
     _stackprof.during_gc += _stackprof.unrecorded_gc_samples;
@@ -772,7 +773,7 @@ stackprof_record_gc_samples(void)
 static void
 stackprof_record_buffer(void)
 {
-    stackprof_record_sample_for_stack(_stackprof.buffer_count, _stackprof.buffer_time.timestamp_usec, _stackprof.buffer_time.delta_usec);
+    stackprof_record_sample_for_stack(_stackprof.buffer_count, _stackprof.frames_buffer, _stackprof.lines_buffer, _stackprof.buffer_time.timestamp_usec, _stackprof.buffer_time.delta_usec);
 
     // reset the buffer
     _stackprof.buffer_count = 0;
