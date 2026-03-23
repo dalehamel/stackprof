@@ -45,6 +45,13 @@ static const char *fake_frame_cstrs[] = {
 static int stackprof_use_postponed_job = 1;
 static int ruby_vm_running = 0;
 
+#ifdef STACKPROF_TESTING
+/* Hook called between setting up GC frames and recording them.
+ * A test extension can set this to inject a stackprof_buffer_sample() call,
+ * reproducing the signal handler race that overwrites frames_buffer. */
+void (*stackprof_record_gc_samples_hook)(void) = NULL;
+#endif
+
 #define TOTAL_FAKE_FRAMES (sizeof(fake_frame_cstrs) / sizeof(char *))
 
 #ifdef _POSIX_MONOTONIC_CLOCK
@@ -717,6 +724,13 @@ stackprof_record_gc_samples(void)
         _stackprof.lines_buffer[1] = 0;
         _stackprof.unrecorded_gc_marking_samples--;
 
+#ifdef STACKPROF_TESTING
+        if (stackprof_record_gc_samples_hook) {
+            _stackprof.buffer_count = 0;
+            stackprof_record_gc_samples_hook();
+            _stackprof.buffer_count = 0;
+        }
+#endif
         stackprof_record_sample_for_stack(2, start_timestamp, timestamp_delta);
       } else if (_stackprof.unrecorded_gc_sweeping_samples) {
         _stackprof.frames_buffer[0] = FAKE_FRAME_SWEEP;
@@ -726,10 +740,25 @@ stackprof_record_gc_samples(void)
 
         _stackprof.unrecorded_gc_sweeping_samples--;
 
+#ifdef STACKPROF_TESTING
+        if (stackprof_record_gc_samples_hook) {
+            _stackprof.buffer_count = 0;
+            stackprof_record_gc_samples_hook();
+            _stackprof.buffer_count = 0;
+        }
+#endif
         stackprof_record_sample_for_stack(2, start_timestamp, timestamp_delta);
       } else {
         _stackprof.frames_buffer[0] = FAKE_FRAME_GC;
         _stackprof.lines_buffer[0] = 0;
+
+#ifdef STACKPROF_TESTING
+        if (stackprof_record_gc_samples_hook) {
+            _stackprof.buffer_count = 0;
+            stackprof_record_gc_samples_hook();
+            _stackprof.buffer_count = 0;
+        }
+#endif
         stackprof_record_sample_for_stack(1, start_timestamp, timestamp_delta);
       }
     }
