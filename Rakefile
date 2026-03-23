@@ -24,4 +24,11 @@ else
   end
 end
 
-task default: %i(compile test)
+task :compile_for_test do
+  ENV['STACKPROF_TESTING'] = '1'
+  Rake::Task[:clean].invoke
+  Rake::Task[:compile].invoke
+end
+
+task test: :compile_for_test
+task default: :test

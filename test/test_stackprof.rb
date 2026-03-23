@@ -265,6 +265,61 @@ class StackProfTest < Minitest::Test
     assert_operator profile[:missed_samples], :<=, 25
   end
 
+  # Regression test for a data race where the signal handler calls
+  # stackprof_buffer_sample() -> rb_profile_frames(), overwriting the shared
+  # _stackprof.frames_buffer while stackprof_record_gc_samples is using it
+  # to record GC fake frames.
+  #
+  # A separate test C extension (stackprof_test_helper) installs a hook via
+  # the stackprof_record_gc_samples_hook function pointer that calls
+  # stackprof_buffer_sample() inside stackprof_record_gc_samples, right
+  # after GC frames are set up but before stackprof_record_sample_for_stack
+  # processes them - exactly reproducing what happens when a signal arrives
+  # at that point. On unfixed code, this overwrites the GC frames in the
+  # shared buffer with real stack frames, so the GC frame IDs end up in raw
+  # but never in the frames hash. On fixed code, GC frames use stack-local
+  # arrays immune to the overwrite.
+  def test_gc_frames_not_clobbered_by_signal_handler
+    build_and_load_test_helper
+    StackProfTestHelper.install_gc_race_hook
+
+    profile = StackProf.run(interval: 100, raw: true) do
+      5.times do
+        GC.start
+      end
+    end
+
+    raw = profile[:raw]
+    frames = profile[:frames]
+
+    gc_frame = frames.values.find{ |f| f[:name] == "(garbage collection)" }
+    assert gc_frame, "expected (garbage collection) frame in frames hash but it was missing"
+
+    # Verify every frame referenced in raw exists in frames
+    missing_frames = []
+    if raw && raw.size > 0
+      i = 0
+      while i < raw.size
+        num = raw[i]
+        i += 1
+        num.times do
+          frame_id = raw[i]
+          unless frames.key?(frame_id)
+            missing_frames << frame_id
+          end
+          i += 1
+        end
+        i += 1 # skip count
+      end
+    end
+
+    assert_empty missing_frames,
+      "raw sample data references frame IDs not present in frames hash: #{missing_frames.uniq.inspect}. " \
+      "This indicates the signal handler overwrote frames_buffer during GC recording."
+  ensure
+    StackProfTestHelper.remove_gc_race_hook if defined?(StackProfTestHelper)
+  end
+
   def test_out
     tmpfile = Tempfile.new('stackprof-out')
     ret = StackProf.run(mode: :custom, out: tmpfile) do
@@ -324,5 +379,20 @@ class StackProfTest < Minitest::Test
   ensure
     r.close
     w.close
+  end
+
+  def build_and_load_test_helper
+    return if defined?(StackProfTestHelper)
+
+    ext_dir = File.expand_path("ext", __dir__)
+    unless File.exist?(File.join(ext_dir, "Makefile"))
+      system(RbConfig.ruby, "extconf.rb", chdir: ext_dir, exception: true,
+             out: File::NULL, err: File::NULL)
+    end
+    system("make", "-C", ext_dir, "-j", exception: true,
+           out: File::NULL, err: File::NULL)
+    require "#{ext_dir}/stackprof_test_helper"
+  rescue LoadError => e
+    skip "test helper not available (compile with STACKPROF_TESTING=1): #{e.message}"
   end
 end unless RUBY_ENGINE == 'truffleruby'
